@@ -1,0 +1,362 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  # Create VPC for Ansible Control node
+  AnsibleControlNodeVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "192.168.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: AnsibleControlNodeVPC
+
+  # Create Subnet for Ansible Contol Node VPC
+  AnsibleControlNodeSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "192.168.1.0/24"
+      AvailabilityZone: !Join ['', [ !Ref AWS::Region, 'a']]
+      VpcId: !Ref AnsibleControlNodeVPC
+      Tags:
+        - Key: Name
+          Value: AnsibleControlNodeSubnet
+    DependsOn:
+      - AnsibleControlNodeVPC
+
+  # Create Route Table
+  AnsibleControlNodeRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AnsibleControlNodeVPC
+    DependsOn:
+      - AnsibleControlNodeVPC
+  # Ansible Subnet Association with Route Table
+  AnsibleControlNodeSubnetAssociateRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AnsibleControlNodeSubnet
+      RouteTableId: !Ref AnsibleControlNodeRouteTable
+    DependsOn:
+      - AnsibleControlNodeSubnet
+      - AnsibleControlNodeRouteTable
+  # Internet Gateway for AnsibleControlNode VPC
+  AnsibleControlNodeInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: AnsibleControlnodeInternetGateway
+  # Control Node VPC gateway attachment
+  AnsibleControlNodeVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref AnsibleControlNodeInternetGateway
+      VpcId: !Ref AnsibleControlNodeVPC
+    DependsOn:
+      - AnsibleControlNodeInternetGateway
+      - AnsibleControlNodeVPC
+  # Control Node InternetGateway Route
+  AnsibleControlNodeInternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref AnsibleControlNodeInternetGateway
+      RouteTableId: !Ref AnsibleControlNodeRouteTable
+    DependsOn:
+      - AnsibleControlNodeInternetGateway
+      - AnsibleControlNodeRouteTable
+  # Create Network Interface
+  AnsibleControlNodeNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      GroupSet:
+        - !GetAtt AnsibleControlNodeVPC.DefaultSecurityGroup
+      SubnetId: !Ref AnsibleControlNodeSubnet
+    DependsOn:
+      - SSHFromAnywhereIngressRule
+      - AnsibleControlNodeSubnet
+  # Create Ansible Control Node EC2 instance
+  AnsibleContolNodeHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-00f7e5c52c0f43726"
+      KeyName: "oregon-key"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash -xe
+          yum update -y   # update the packages 
+          amazon-linux-extras install ansible2 -y #install ansible2 
+          
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref AnsibleControlNodeNetworkInterface
+          DeviceIndex: 0
+    DependsOn:
+      - AnsibleControlNodeNetworkInterface
+      - AnsibleControlNodeSubnet
+      - AnsibleControlNodeVPC
+
+
+  # Create EIP and Associate EIP to Ansible Control Node to access from out side
+  AnsibleControlNodeEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+  AnsibleControlNodeEIPAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt AnsibleControlNodeEIP.AllocationId
+      NetworkInterfaceId: !Ref AnsibleControlNodeNetworkInterface
+    DependsOn:
+      - AnsibleControlNodeEIP
+      - AnsibleControlNodeNetworkInterface
+
+  # Create Security Group to access from anywhere
+  SSHFromAnywhereIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt AnsibleControlNodeVPC.DefaultSecurityGroup
+      CidrIp: "0.0.0.0/0"
+      IpProtocol: "tcp"
+      FromPort: 22
+      ToPort: 22
+    DependsOn:
+      - AnsibleControlNodeVPC
+
+  # Create Transit Gateway
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      DnsSupport: enable
+      DefaultRouteTablePropagation: enable
+      DefaultRouteTableAssociation: enable
+      AutoAcceptSharedAttachments: disable
+      AssociationDefaultRouteTableId: enable
+      Tags:
+        - Key: Name
+          Value: TransitGateway
+  # Create AnsibleControlNodeVPC Transitgateway Attachement
+  AnsiblecontrolNodeVPCTransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      VpcId: !Ref AnsibleControlNodeVPC
+      SubnetIds:
+        - !Ref AnsibleControlNodeSubnet
+      TransitGatewayId: !Ref TransitGateway
+    DependsOn:
+      - AnsibleControlNodeSubnet
+      - TransitGateway
+      - AnsibleControlNodeVPC
+  # AnsibleControlNode Transit Gateway Route
+  AnsibleControlNodeTransitGatewayroute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "172.32.0.0/16"
+      TransitGatewayId: !Ref TransitGateway
+      RouteTableId: !Ref AnsibleControlNodeRouteTable
+    DependsOn:
+      - TransitGateway
+      - AnsibleControlNodeRouteTable
+      - AnsiblecontrolNodeVPCTransitGatewayAttachment
+  # Ansible Target Nodes setup
+  # Ansible Tager Nodes VPC
+  AnsibleTargetNodeVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "172.32.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: AnsibleTargetNodeVPC
+  # Create subnets for AnsibleTargetNodeVPC
+  # Public Subnet to associate with NAT Gateway
+  AnsibleTargetNodePublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "172.32.1.0/24"
+      VpcId: !Ref AnsibleTargetNodeVPC
+      #AvailabilityZone: !Join ['',[!Ref AWS::Region, 'a']]
+    DependsOn:
+      - AnsibleTargetNodeVPC
+  # Public Route Table for Ansible Target Node
+  AnsibleTargetNodePublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+        VpcId: !Ref AnsibleTargetNodeVPC
+    DependsOn:
+      - AnsibleTargetNodeVPC
+  # Private Route Table for Ansible Target node
+  AnsibleTargetNodePrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref AnsibleTargetNodeVPC
+    DependsOn:
+      - AnsibleTargetNodeVPC
+  # AnsibleTargetNode Private Subnet 1
+  AnsibleTargetNodePrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "172.32.2.0/24"
+      VpcId: !Ref AnsibleTargetNodeVPC
+      AvailabilityZone: !Join ['', [!Ref AWS::Region, 'a']]
+    DependsOn:
+      - AnsibleTargetNodeVPC
+
+  # AnsibleTargetNode Private Subnet 2
+  AnsibleTargetNodePrivateSubnet02:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: "172.32.3.0/24"
+      VpcId: !Ref AnsibleTargetNodeVPC
+      AvailabilityZone: !Join ['', [!Ref AWS::Region, 'b']]
+    DependsOn:
+      - AnsibleTargetNodeVPC
+
+  # AnsibleTargetNode Public Subnet Route Table Association
+  AnsibleTargetNodePublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AnsibleTargetNodePublicSubnet
+      RouteTableId: !Ref AnsibleTargetNodePublicRouteTable
+    DependsOn:
+      - AnsibleTargetNodePublicSubnet
+      - AnsibleTargetNodePublicRouteTable
+  # AnsibleTargetNode Private subnet Route Table Association 01
+  AnsibleTargetNodePrivateSubnetRouteTableAssociation01:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AnsibleTargetNodePrivateSubnet01
+      RouteTableId: !Ref AnsibleTargetNodePrivateRouteTable
+    DependsOn:
+      - AnsibleTargetNodePrivateSubnet01
+      - AnsibleTargetNodePrivateRouteTable
+  # AnsibleTargetNode Private subnet Route Table Association 02
+  AnsibleTargetNodePrivateSubnetRouteTableAssociation02:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AnsibleTargetNodePrivateSubnet02
+      RouteTableId: !Ref AnsibleTargetNodePrivateRouteTable
+    DependsOn:
+      - AnsibleTargetNodePrivateSubnet02
+      - AnsibleTargetNodePrivateRouteTable
+  #AnsibleTargetNode VPC InternetGateway
+  AnsibleTargetNodeInternetGateway:
+    Type: AWS::EC2::InternetGateway
+  # AnsibleTargetNode VPC Gateway Attachment
+  AnsibleTargetNodeVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref AnsibleTargetNodeVPC
+      InternetGatewayId: !Ref AnsibleTargetNodeInternetGateway
+    DependsOn:
+      - AnsibleTargetNodeVPC
+      - AnsibleTargetNodeInternetGateway
+  #AnsibleTargetNode InternetGatewayRoute
+  AnsibleTargetNodeInternetGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: "0.0.0.0/0"
+      RouteTableId: !Ref AnsibleTargetNodePublicRouteTable
+      GatewayId: !Ref AnsibleTargetNodeInternetGateway
+    DependsOn:
+      - AnsibleTargetNodePublicRouteTable
+      - AnsibleTargetNodeInternetGateway
+  # AnsibleTargetNodeTransit Gateway Route
+  AnsibleTargetNodeTransitGatewayRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AnsibleTargetNodePrivateRouteTable
+      TransitGatewayId: !Ref TransitGateway
+      DestinationCidrBlock: "192.168.0.0/16"
+    DependsOn:
+      - AnsibleTargetNodePrivateRouteTable
+      - TransitGateway
+      - AnsibleTargetNodeVPCTransitGatewayAttachments
+  #AnsibleTargetNodeVPCTransitGatewayAttachments
+  AnsibleTargetNodeVPCTransitGatewayAttachments:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref AnsibleTargetNodeVPC
+      SubnetIds:
+        - !Ref AnsibleTargetNodePrivateSubnet01
+        - !Ref AnsibleTargetNodePrivateSubnet02
+    DependsOn:
+      - AnsibleTargetNodeVPC
+      - TransitGateway
+      - AnsibleTargetNodePublicSubnetRouteTableAssociation
+  # AnsibleTargetVPC  EIP
+  AnsibleTargetEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+  # Asnible Target NAT Gateway
+  AnsibleTargetNATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref AnsibleTargetNodePublicSubnet
+      AllocationId: !GetAtt AnsibleTargetEIP.AllocationId
+    DependsOn:
+      - AnsibleTargetNodePublicSubnet
+      - AnsibleTargetEIP
+  #AnsibleTargetNATRoute:
+  AnsibleTargetNATRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AnsibleTargetNodePrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref AnsibleTargetNATGateway
+    DependsOn:
+      - AnsibleTargetNodePrivateRouteTable
+      - AnsibleTargetNATGateway
+ # Security Group Rules for Ansible Target Nodes
+  SSHInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow port 22 for SSH and 80 for WebServer
+      VpcId: !Ref AnsibleTargetNodeVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: "tcp"
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: TargetNodeSecurityGroup
+    DependsOn:
+      - AnsibleTargetNodeVPC
+  # Create Ansible Target Node 1 EC2 instance
+  AnsibleTargetNodeHost1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-00f7e5c52c0f43726"
+      KeyName: "oregon-key"
+      SubnetId: !Ref AnsibleTargetNodePrivateSubnet01
+      SecurityGroupIds:
+        - !Ref SSHInstanceSecurityGroup
+    DependsOn:
+      - AnsibleTargetNodePrivateSubnet01
+      - SSHInstanceSecurityGroup
+  # Create Ansible Target Node 2 EC2 instance
+  AnsibleTargetNodeHost2:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: "ami-00f7e5c52c0f43726"
+      KeyName: "oregon-key"
+      SubnetId: !Ref AnsibleTargetNodePrivateSubnet02
+      SecurityGroupIds:
+        - !Ref SSHInstanceSecurityGroup
+    DependsOn:
+      - AnsibleTargetNodePrivateSubnet02
+      - SSHInstanceSecurityGroup
+
